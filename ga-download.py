@@ -1,96 +1,128 @@
-from googleapiclient.discovery import build
-from oauth2client.service_account import ServiceAccountCredentials
-import json
-import csv
+import os
 import sqlite3
 import mysql.connector
 import psycopg2
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from oauth2client.service_account import ServiceAccountCredentials
+import json
+import csv
+import sys
 
-
+# Environment variables for sensitive information
+KEY_FILE_PATH = os.getenv('GA_KEY_FILE_PATH')
+VIEW_ID = os.getenv('GA_VIEW_ID')
 SCOPES = ['https://www.googleapis.com/auth/analytics.readonly']
-KEY_FILE_PATH = 'path/to/your/service-account-file.json'
-VIEW_ID = 'YOUR_VIEW_ID'
 
 def initialize_analyticsreporting():
-    """Initializes an Analytics Reporting API V4 service object."""
-    credentials = ServiceAccountCredentials.from_json_keyfile_name(KEY_FILE_PATH, SCOPES)
-    analytics = build('analyticsreporting', 'v4', credentials=credentials)
-    return analytics
+    """Initializes an Analytics Reporting API V4 service object with error handling."""
+    try:
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(KEY_FILE_PATH, SCOPES)
+        analytics = build('analyticsreporting', 'v4', credentials=credentials)
+        return analytics
+    except FileNotFoundError:
+        print("The service account JSON key file was not found.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred during Analytics Reporting API service initialization: {e}")
+        sys.exit(1)
 
 def get_report(analytics, start_date, end_date):
-    """Queries the Analytics Reporting API V4."""
-    return analytics.reports().batchGet(
-        body={
-            'reportRequests': [
-                {
-                    'viewId': VIEW_ID,
-                    'dateRanges': [{'startDate': start_date, 'endDate': end_date}],
-                    'metrics': [{'expression': 'ga:sessions'}],
-                    'dimensions': [{'name': 'ga:country'}]
-                }]
-        }
-    ).execute()
+    """Queries the Analytics Reporting API V4 with error handling."""
+    try:
+        return analytics.reports().batchGet(
+            body={
+                'reportRequests': [
+                    {
+                        'viewId': VIEW_ID,
+                        'dateRanges': [{'startDate': start_date, 'endDate': end_date}],
+                        'metrics': [{'expression': 'ga:sessions'}],
+                        'dimensions': [{'name': 'ga:country'}]
+                    }]
+            }
+        ).execute()
+    except HttpError as error:
+        print(f"An HTTP error occurred: {error.resp.status} {error.error_details}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred while querying the Analytics Reporting API: {e}")
+        sys.exit(1)
 
 def save_response_to_file(response, file_format, file_path):
-    """Saves the Analytics Reporting API V4 response to a file in the specified format."""
-    if file_format.lower() == 'json':
-        with open(file_path, 'w') as jsonfile:
-            json.dump(response, jsonfile, indent=2)
-    elif file_format.lower() == 'csv':
-        with open(file_path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['Country', 'Sessions'])  # Column headers
-            
-            for report in response.get('reports', []):
-                rows = report.get('data', {}).get('rows', [])
-                for row in rows:
-                    dimensions = row.get('dimensions', [])
-                    metrics = row.get('metrics', [])[0].get('values', [])
-                    writer.writerow(dimensions + metrics)
-    else:
-        print(f"Unsupported file format: {file_format}")
-        
+    """Saves the API response to a file with error handling."""
+    try:
+        if file_format.lower() == 'json':
+            with open(file_path, 'w') as jsonfile:
+                json.dump(response, jsonfile, indent=2)
+        elif file_format.lower() == 'csv':
+            with open(file_path, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Country', 'Sessions'])  # Column headers
+                for report in response.get('reports', []):
+                    rows = report.get('data', {}).get('rows', [])
+                    for row in rows:
+                        dimensions = row.get('dimensions', [])
+                        metrics = row.get('metrics', [])[0].get('values', [])
+                        writer.writerow(dimensions + metrics)
+        else:
+            print("Unsupported file format. Please choose either CSV or JSON.")
+    except IOError as e:
+        print(f"An error occurred while writing to file: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        sys.exit(1)
+
+def connect_to_database(db_type, db_credentials):
+    """Establishes database connection with error handling."""
+    try:
+        if db_type == 'sqlite':
+            conn = sqlite3.connect(db_credentials['db_name'])
+        elif db_type == 'mysql':
+            conn = mysql.connector.connect(
+                host=db_credentials['host'],
+                user=db_credentials['user'],
+                password=db_credentials['password'],
+                database=db_credentials['db_name'],
+                use_pure=True  # Use the pure Python implementation
+            )
+        elif db_type == 'postgresql':
+            conn = psycopg2.connect(
+                host=db_credentials['host'],
+                database=db_credentials['db_name'],
+                user=db_credentials['user'],
+                password=db_credentials['password']
+            )
+        else:
+            print("Unsupported database type. Supported types are: sqlite, mysql, postgresql.")
+            sys.exit(1)
+        return conn
+    except Exception as e:
+        print(f"An error occurred while connecting to the database: {e}")
+        sys.exit(1)
+
 def save_response_to_db(response, db_type, db_credentials):
-    """Saves the response data to the specified database."""
-    # Extract data for simplicity
-    data = []
-    for report in response.get('reports', []):
-        rows = report.get('data', {}).get('rows', [])
-        for row in rows:
-            country = row.get('dimensions', [])[0]
-            sessions = row.get('metrics', [])[0].get('values', [])[0]
-            data.append((country, sessions))
-    
-    if db_type == 'sqlite':
-        conn = sqlite3.connect(db_credentials['db_name'])
-    elif db_type == 'mysql':
-        conn = mysql.connector.connect(
-            host=db_credentials['host'],
-            user=db_credentials['user'],
-            password=db_credentials['password'],
-            database=db_credentials['db_name']
-        )
-    elif db_type == 'postgresql':
-        conn = psycopg2.connect(
-            host=db_credentials['host'],
-            database=db_credentials['db_name'],
-            user=db_credentials['user'],
-            password=db_credentials['password']
-        )
-    else:
-        print("Unsupported database type")
-        return
-    
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE IF NOT EXISTS analytics_data (country VARCHAR(255), sessions INT)")
-    
-    insert_query = "INSERT INTO analytics_data (country, sessions) VALUES (%s, %s)"
-    cur.executemany(insert_query, data)
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f"Data successfully saved to {db_type} database.")
+    """Saves the response data to the specified database with error handling."""
+    conn = connect_to_database(db_type, db_credentials)
+    try:
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS analytics_data (country VARCHAR(255), sessions INT)")
+        data = []
+        for report in response.get('reports', []):
+            rows = report.get('data', {}).get('rows', [])
+            for row in rows:
+                country = row.get('dimensions', [])[0]
+                sessions = row.get('metrics', [])[0].get('values', [])[0]
+                data.append((country, sessions))
+        insert_query = "INSERT INTO analytics_data (country, sessions) VALUES (%s, %s)"
+        cur.executemany(insert_query, data)
+        conn.commit()
+    except Exception as e:
+        print(f"An error occurred while inserting data into the database: {e}")
+        sys.exit(1)
+    finally:
+        cur.close()
+        conn.close()
 
 if __name__ == '__main__':
     analytics = initialize_analyticsreporting()
